@@ -32,6 +32,11 @@ router.post('/register', [
     const db = getDatabase();
     const dbType = getDatabaseType();
     
+    // Vérifier que la base de données est disponible
+    if (!db || !dbType) {
+      return res.status(503).json({ error: 'Base de données non disponible. Veuillez réessayer plus tard.' });
+    }
+    
     // Vérifier si l'utilisateur existe déjà
     let existingUser;
     if (dbType === 'postgresql') {
@@ -93,7 +98,11 @@ router.post('/register', [
     });
   } catch (error) {
     console.error('Erreur inscription:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
+    // Retourner un message d'erreur plus détaillé en développement
+    const errorMessage = process.env.NODE_ENV === 'development' 
+      ? error.message 
+      : 'Erreur serveur lors de l\'inscription';
+    res.status(500).json({ error: errorMessage });
   }
 });
 
@@ -114,6 +123,11 @@ router.post('/login', [
     const { email, password } = req.body;
     const db = getDatabase();
     const dbType = getDatabaseType();
+    
+    // Vérifier que la base de données est disponible
+    if (!db || !dbType) {
+      return res.status(503).json({ error: 'Base de données non disponible. Veuillez réessayer plus tard.' });
+    }
     
     // Récupérer l'utilisateur
     let user;
@@ -177,6 +191,85 @@ router.get('/me', authenticate, async (req, res) => {
       steam_id: req.user.steam_id
     }
   });
+});
+
+/**
+ * GET /api/auth/steam
+ * Démarre l'authentification Steam
+ */
+router.get('/steam', (req, res, next) => {
+  const passport = require('../config/steam');
+  passport.authenticate('steam', { failureRedirect: '/' })(req, res, next);
+});
+
+/**
+ * GET /api/auth/steam/return
+ * Callback Steam après authentification
+ */
+router.get('/steam/return', async (req, res, next) => {
+  const passport = require('../config/steam');
+  const { getDatabase, getDatabaseType } = require('../config/database');
+  const { generateToken } = require('../config/jwt');
+  
+  passport.authenticate('steam', async (err, steamUser) => {
+    if (err || !steamUser) {
+      return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=steam_auth_failed`);
+    }
+    
+    try {
+      const db = getDatabase();
+      const dbType = getDatabaseType();
+      
+      if (!db || !dbType) {
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=database_unavailable`);
+      }
+      
+      // Chercher ou créer l'utilisateur
+      let user;
+      if (dbType === 'postgresql') {
+        // Chercher l'utilisateur par Steam ID
+        const result = await db.query(
+          'SELECT id, username, email, credits, role, steam_id FROM users WHERE steam_id = $1',
+          [steamUser.steamId]
+        );
+        
+        if (result.rows.length > 0) {
+          // Utilisateur existant
+          user = result.rows[0];
+        } else {
+          // Créer un nouvel utilisateur
+          const insertResult = await db.query(
+            'INSERT INTO users (username, steam_id, email) VALUES ($1, $2, $3) RETURNING id, username, email, credits, role, steam_id',
+            [steamUser.username, steamUser.steamId, `${steamUser.steamId}@steam.local`]
+          );
+          user = insertResult.rows[0];
+        }
+      } else if (dbType === 'mongodb') {
+        const User = require('../models/User');
+        user = await User.findOne({ steam_id: steamUser.steamId });
+        
+        if (!user) {
+          user = await User.create({
+            username: steamUser.username,
+            steam_id: steamUser.steamId,
+            email: `${steamUser.steamId}@steam.local`
+          });
+        }
+        user = user.toObject();
+      }
+      
+      // Générer le token JWT
+      const token = generateToken({ userId: user.id });
+      
+      // Rediriger vers le frontend avec le token
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      res.redirect(`${frontendUrl}/auth/callback?token=${token}&steamId=${steamUser.steamId}`);
+      
+    } catch (error) {
+      console.error('Erreur authentification Steam:', error);
+      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=server_error`);
+    }
+  })(req, res, next);
 });
 
 module.exports = router;

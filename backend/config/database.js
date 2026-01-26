@@ -14,7 +14,10 @@ if (process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith('postgresql:
   
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    connectionTimeoutMillis: 5000, // Timeout de 5 secondes
+    idleTimeoutMillis: 30000,
+    max: 10 // Nombre max de connexions
   });
   
   db = pool;
@@ -41,24 +44,40 @@ if (process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith('postgresql:
 async function connectDatabase() {
   if (dbType === 'postgresql') {
     try {
-      await db.query('SELECT NOW()');
+      // Timeout de 5 secondes pour la connexion
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout de connexion')), 5000)
+      );
+      
+      await Promise.race([
+        db.query('SELECT NOW()'),
+        timeoutPromise
+      ]);
+      
       console.log('✅ Base de données PostgreSQL connectée');
       await initPostgreSQLTables();
     } catch (error) {
-      console.error('❌ Erreur de connexion PostgreSQL:', error);
-      throw error;
+      console.warn('⚠️  Avertissement: Base de données non accessible:', error.message);
+      console.warn('⚠️  Le serveur démarre quand même, mais certaines fonctionnalités ne fonctionneront pas.');
+      // Ne pas throw l'erreur, permettre au serveur de démarrer
+      return false;
     }
   } else if (dbType === 'mongodb') {
     try {
-      await mongoose.connect(process.env.MONGODB_URI);
+      await mongoose.connect(process.env.MONGODB_URI, {
+        serverSelectionTimeoutMS: 5000
+      });
       console.log('✅ Base de données MongoDB connectée');
     } catch (error) {
-      console.error('❌ Erreur de connexion MongoDB:', error);
-      throw error;
+      console.warn('⚠️  Avertissement: Base de données non accessible:', error.message);
+      console.warn('⚠️  Le serveur démarre quand même, mais certaines fonctionnalités ne fonctionneront pas.');
+      // Ne pas throw l'erreur, permettre au serveur de démarrer
+      return false;
     }
   } else {
     console.warn('⚠️  Aucune base de données configurée');
   }
+  return true;
 }
 
 /**
