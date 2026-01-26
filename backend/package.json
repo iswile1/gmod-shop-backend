@@ -21,7 +21,10 @@
     "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
     "morgan": "^1.10.0",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "passport": "^0.7.0",
+    "passport-steam": "^1.0.17",
+    "express-session": "^1.17.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
