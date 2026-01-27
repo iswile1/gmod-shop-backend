@@ -26,6 +26,9 @@ const { connectDatabase } = require('./config/database');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust proxy (nécessaire pour Railway et les headers X-Forwarded-For)
+app.set('trust proxy', true);
+
 // Middlewares de sécurité
 app.use(helmet());
 // Configuration CORS - Accepter toutes les origines (temporaire pour debug)

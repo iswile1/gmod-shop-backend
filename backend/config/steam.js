@@ -9,7 +9,13 @@ const SteamStrategy = require('passport-steam').Strategy;
 // Configuration Steam
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const STEAM_REALM = process.env.STEAM_REALM || process.env.FRONTEND_URL || 'http://localhost:3000';
-const STEAM_RETURN_URL = process.env.STEAM_RETURN_URL || `${STEAM_REALM}/api/auth/steam/return`;
+const STEAM_RETURN_URL = process.env.STEAM_RETURN_URL || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/api/auth/steam/return`;
+
+// Log pour déboguer (à retirer en production)
+console.log('🔐 Configuration Steam:');
+console.log('  - STEAM_REALM:', STEAM_REALM);
+console.log('  - STEAM_RETURN_URL:', STEAM_RETURN_URL);
+console.log('  - STEAM_API_KEY:', STEAM_API_KEY ? '✅ Configuré' : '❌ Manquant');
 
 // Configuration de la stratégie Steam
 passport.use(new SteamStrategy({

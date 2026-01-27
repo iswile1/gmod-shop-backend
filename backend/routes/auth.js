@@ -207,12 +207,20 @@ router.get('/steam', (req, res, next) => {
  * Callback Steam après authentification
  */
 router.get('/steam/return', async (req, res, next) => {
+  console.log('🔐 Steam return callback appelé');
+  console.log('📥 Query params:', req.query);
+  
   const passport = require('../config/steam');
   const { getDatabase, getDatabaseType } = require('../config/database');
   const { generateToken } = require('../config/jwt');
   
   passport.authenticate('steam', async (err, steamUser) => {
+    console.log('🔐 Steam authenticate callback');
+    console.log('❌ Erreur:', err);
+    console.log('👤 Steam User:', steamUser);
+    
     if (err || !steamUser) {
+      console.error('❌ Erreur authentification Steam:', err);
       return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=steam_auth_failed`);
     }
     
@@ -260,13 +268,17 @@ router.get('/steam/return', async (req, res, next) => {
       
       // Générer le token JWT
       const token = generateToken({ userId: user.id });
+      console.log('✅ Token généré pour user:', user.id);
       
       // Rediriger vers le frontend avec le token
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      res.redirect(`${frontendUrl}/auth/callback?token=${token}&steamId=${steamUser.steamId}`);
+      const redirectUrl = `${frontendUrl}/auth/callback?token=${token}&steamId=${steamUser.steamId}`;
+      console.log('🔄 Redirection vers:', redirectUrl);
+      res.redirect(redirectUrl);
       
     } catch (error) {
-      console.error('Erreur authentification Steam:', error);
+      console.error('❌ Erreur authentification Steam:', error);
+      console.error('❌ Stack:', error.stack);
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=server_error`);
     }
   })(req, res, next);
