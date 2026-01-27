@@ -14,6 +14,8 @@ router.post('/create-intent', authenticate, async (req, res) => {
     const { product_id, payment_method } = req.body
     const userId = req.user.id
 
+    console.log('💳 Création intent paiement:', { product_id, payment_method, userId })
+
     if (!product_id) {
       return res.status(400).json({ error: 'product_id requis' })
     }
@@ -22,6 +24,7 @@ router.post('/create-intent', authenticate, async (req, res) => {
     const dbType = getDatabaseType()
 
     if (!db || !dbType) {
+      console.error('❌ Base de données non disponible')
       return res.status(500).json({ error: 'Base de données non disponible' })
     }
 
@@ -30,13 +33,16 @@ router.post('/create-intent', authenticate, async (req, res) => {
     if (dbType === 'postgresql') {
       const result = await db.query('SELECT * FROM products WHERE id = $1', [product_id])
       if (result.rows.length === 0) {
+        console.error('❌ Produit non trouvé:', product_id)
         return res.status(404).json({ error: 'Produit non trouvé' })
       }
       product = result.rows[0]
+      console.log('✅ Produit trouvé:', product.name, product.price)
     } else {
       const Product = require('../models/Product')
       product = await Product.findById(product_id)
       if (!product) {
+        console.error('❌ Produit non trouvé:', product_id)
         return res.status(404).json({ error: 'Produit non trouvé' })
       }
     }
@@ -44,13 +50,26 @@ router.post('/create-intent', authenticate, async (req, res) => {
     // Créer une transaction en attente
     let transaction
     if (dbType === 'postgresql') {
-      const transResult = await db.query(
-        `INSERT INTO transactions (user_id, product_id, amount, status, payment_method, created_at)
-         VALUES ($1, $2, $3, 'pending', $4, NOW())
-         RETURNING *`,
-        [userId, product_id, product.price, payment_method || 'stripe']
-      )
-      transaction = transResult.rows[0]
+      try {
+        const transResult = await db.query(
+          `INSERT INTO transactions (user_id, product_id, amount, status, payment_method, created_at)
+           VALUES ($1, $2, $3, 'pending', $4, NOW())
+           RETURNING *`,
+          [userId, product_id, product.price, payment_method || 'stripe']
+        )
+        transaction = transResult.rows[0]
+        console.log('✅ Transaction créée:', transaction.id)
+      } catch (error) {
+        console.error('❌ Erreur création transaction:', error.message)
+        console.error('❌ Détails:', error)
+        // Si la table n'existe pas, donner un message plus clair
+        if (error.message.includes('relation "transactions" does not exist')) {
+          return res.status(500).json({ 
+            error: 'Table transactions manquante. Exécutez le script CREATE_TRANSACTIONS_TABLE.sql dans Supabase.' 
+          })
+        }
+        throw error
+      }
     } else {
       const Transaction = require('../models/Transaction')
       transaction = await Transaction.create({
@@ -78,8 +97,12 @@ router.post('/create-intent', authenticate, async (req, res) => {
         return handleStripePayment(product, transaction, res)
     }
   } catch (error) {
-    console.error('Erreur création intent paiement:', error)
-    res.status(500).json({ error: 'Erreur lors de la création du paiement' })
+    console.error('❌ Erreur création intent paiement:', error)
+    console.error('❌ Stack:', error.stack)
+    res.status(500).json({ 
+      error: 'Erreur lors de la création du paiement',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    })
   }
 })
 
@@ -100,9 +123,7 @@ async function handleStripePayment(product, transaction, res) {
         product_id: product.id.toString(),
         user_id: transaction.user_id.toString()
       },
-      automatic_payment_methods: {
-        enabled: true,
-      },
+      payment_method_types: ['card'], // Spécifier explicitement les cartes bancaires
     })
 
     res.json({
