@@ -1,6 +1,6 @@
 const express = require('express')
 const router = express.Router()
-const { authenticateToken } = require('../config/jwt')
+const { authenticate } = require('../middleware/auth')
 const { getDatabase, getDatabaseType } = require('../config/database')
 const Stripe = require('stripe')
 
@@ -9,10 +9,10 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 /**
  * Créer un intent de paiement (Stripe, PayPal, Paysafecard)
  */
-router.post('/create-intent', authenticateToken, async (req, res) => {
+router.post('/create-intent', authenticate, async (req, res) => {
   try {
     const { product_id, payment_method } = req.body
-    const userId = req.user.userId
+    const userId = req.user.id
 
     if (!product_id) {
       return res.status(400).json({ error: 'product_id requis' })
@@ -366,9 +366,9 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
 /**
  * Récupérer l'historique des transactions de l'utilisateur
  */
-router.get('/transactions', authenticateToken, async (req, res) => {
+router.get('/transactions', authenticate, async (req, res) => {
   try {
-    const userId = req.user.userId
+    const userId = req.user.id
     const db = getDatabase()
     const dbType = getDatabaseType()
 
