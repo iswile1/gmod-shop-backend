@@ -1,210 +1,406 @@
-/**
- * Routes pour les paiements
- * Stripe, PayPal, paysafecard
- */
+const express = require('express')
+const router = express.Router()
+const { authenticateToken } = require('../config/jwt')
+const { getDatabase, getDatabaseType } = require('../config/database')
+const Stripe = require('stripe')
 
-const express = require('express');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { getDatabase, getDatabaseType } = require('../config/database');
-const { authenticate } = require('../middleware/auth');
-
-const router = express.Router();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
 /**
- * POST /api/payments/create-intent
- * Crée une intention de paiement Stripe
+ * Créer un intent de paiement (Stripe, PayPal, Paysafecard)
  */
-router.post('/create-intent', authenticate, async (req, res) => {
+router.post('/create-intent', authenticateToken, async (req, res) => {
   try {
-    const { product_id, payment_method } = req.body;
-    
+    const { product_id, payment_method } = req.body
+    const userId = req.user.userId
+
     if (!product_id) {
-      return res.status(400).json({ error: 'Produit requis' });
+      return res.status(400).json({ error: 'product_id requis' })
     }
-    
-    const db = getDatabase();
-    const dbType = getDatabaseType();
-    
+
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (!db || !dbType) {
+      return res.status(500).json({ error: 'Base de données non disponible' })
+    }
+
     // Récupérer le produit
-    let product;
+    let product
     if (dbType === 'postgresql') {
-      const result = await db.query('SELECT * FROM products WHERE id = $1 AND active = true', [product_id]);
-      product = result.rows[0];
-    } else if (dbType === 'mongodb') {
-      const Product = require('../models/Product');
-      product = await Product.findById(product_id);
-    }
-    
-    if (!product) {
-      return res.status(404).json({ error: 'Produit non trouvé' });
-    }
-    
-    // Créer l'intention de paiement Stripe
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(product.price * 100), // Convertir en centimes
-      currency: 'eur',
-      metadata: {
-        user_id: req.user.id,
-        product_id: product_id,
-        product_type: product.type,
-        credits_amount: product.credits_amount || 0
+      const result = await db.query('SELECT * FROM products WHERE id = $1', [product_id])
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Produit non trouvé' })
       }
-    });
-    
+      product = result.rows[0]
+    } else {
+      const Product = require('../models/Product')
+      product = await Product.findById(product_id)
+      if (!product) {
+        return res.status(404).json({ error: 'Produit non trouvé' })
+      }
+    }
+
     // Créer une transaction en attente
+    let transaction
     if (dbType === 'postgresql') {
-      await db.query(
-        'INSERT INTO transactions (user_id, product_id, amount, payment_method, payment_id, status) VALUES ($1, $2, $3, $4, $5, $6)',
-        [req.user.id, product_id, product.price, payment_method || 'stripe', paymentIntent.id, 'pending']
-      );
-    } else if (dbType === 'mongodb') {
-      const Transaction = require('../models/Transaction');
-      await Transaction.create({
-        user_id: req.user.id,
+      const transResult = await db.query(
+        `INSERT INTO transactions (user_id, product_id, amount, status, payment_method, created_at)
+         VALUES ($1, $2, $3, 'pending', $4, NOW())
+         RETURNING *`,
+        [userId, product_id, product.price, payment_method || 'stripe']
+      )
+      transaction = transResult.rows[0]
+    } else {
+      const Transaction = require('../models/Transaction')
+      transaction = await Transaction.create({
+        user_id: userId,
         product_id: product_id,
         amount: product.price,
-        payment_method: payment_method || 'stripe',
-        payment_id: paymentIntent.id,
-        status: 'pending'
-      });
+        status: 'pending',
+        payment_method: payment_method || 'stripe'
+      })
+      transaction = transaction.toObject()
     }
-    
+
+    // Gérer selon la méthode de paiement
+    switch (payment_method) {
+      case 'stripe':
+        return handleStripePayment(product, transaction, res)
+      
+      case 'paypal':
+        return handlePayPalPayment(product, transaction, res)
+      
+      case 'paysafecard':
+        return handlePaysafecardPayment(product, transaction, res)
+      
+      default:
+        return handleStripePayment(product, transaction, res)
+    }
+  } catch (error) {
+    console.error('Erreur création intent paiement:', error)
+    res.status(500).json({ error: 'Erreur lors de la création du paiement' })
+  }
+})
+
+/**
+ * Gérer le paiement Stripe
+ */
+async function handleStripePayment(product, transaction, res) {
+  try {
+    if (!stripe || !process.env.STRIPE_SECRET_KEY) {
+      return res.status(500).json({ error: 'Stripe non configuré' })
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(Number(product.price) * 100), // Convertir en centimes
+      currency: 'eur',
+      metadata: {
+        transaction_id: transaction.id.toString(),
+        product_id: product.id.toString(),
+        user_id: transaction.user_id.toString()
+      },
+      automatic_payment_methods: {
+        enabled: true,
+      },
+    })
+
     res.json({
       client_secret: paymentIntent.client_secret,
-      payment_intent_id: paymentIntent.id
-    });
+      transaction_id: transaction.id
+    })
   } catch (error) {
-    console.error('Erreur création paiement:', error);
-    res.status(500).json({ error: 'Erreur lors de la création du paiement' });
-  }
-});
-
-/**
- * POST /api/payments/webhook/stripe
- * Webhook Stripe pour confirmer les paiements
- */
-router.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
-  
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error('Erreur webhook Stripe:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-  
-  // Gérer l'événement
-  if (event.type === 'payment_intent.succeeded') {
-    const paymentIntent = event.data.object;
-    await handleSuccessfulPayment(paymentIntent);
-  }
-  
-  res.json({ received: true });
-});
-
-/**
- * Gère un paiement réussi
- */
-async function handleSuccessfulPayment(paymentIntent) {
-  try {
-    const { user_id, product_id, product_type, credits_amount } = paymentIntent.metadata;
-    const db = getDatabase();
-    const dbType = getDatabaseType();
-    
-    // Mettre à jour la transaction
-    if (dbType === 'postgresql') {
-      await db.query(
-        'UPDATE transactions SET status = $1, credits_added = $2 WHERE payment_id = $3',
-        ['completed', credits_amount, paymentIntent.id]
-      );
-      
-      // Ajouter les crédits à l'utilisateur
-      if (credits_amount > 0) {
-        await db.query('UPDATE users SET credits = credits + $1 WHERE id = $2', [credits_amount, user_id]);
-      }
-      
-      // Si c'est un item (arme perm ou skin), l'ajouter à l'inventaire
-      if (product_type === 'weapon_perm' || product_type === 'skin') {
-        const productResult = await db.query('SELECT item_data FROM products WHERE id = $1', [product_id]);
-        if (productResult.rows.length > 0) {
-          await db.query(
-            'INSERT INTO user_items (user_id, product_id, item_type, item_data) VALUES ($1, $2, $3, $4)',
-            [user_id, product_id, product_type, JSON.stringify(productResult.rows[0].item_data)]
-          );
-        }
-      }
-    } else if (dbType === 'mongodb') {
-      const Transaction = require('../models/Transaction');
-      const User = require('../models/User');
-      const Product = require('../models/Product');
-      const UserItem = require('../models/UserItem');
-      
-      await Transaction.findOneAndUpdate(
-        { payment_id: paymentIntent.id },
-        { status: 'completed', credits_added: credits_amount }
-      );
-      
-      if (credits_amount > 0) {
-        await User.findByIdAndUpdate(user_id, { $inc: { credits: credits_amount } });
-      }
-      
-      if (product_type === 'weapon_perm' || product_type === 'skin') {
-        const product = await Product.findById(product_id);
-        if (product) {
-          await UserItem.create({
-            user_id: user_id,
-            product_id: product_id,
-            item_type: product_type,
-            item_data: product.item_data
-          });
-        }
-      }
-    }
-    
-    // Notifier le serveur GMod (optionnel)
-    // await notifyGModServer(user_id, product_type, credits_amount);
-    
-    console.log(`✅ Paiement réussi pour l'utilisateur ${user_id}`);
-  } catch (error) {
-    console.error('Erreur traitement paiement:', error);
+    console.error('Erreur Stripe:', error)
+    res.status(500).json({ error: 'Erreur lors de la création du paiement Stripe' })
   }
 }
 
 /**
- * GET /api/payments/transactions
- * Historique des transactions de l'utilisateur
+ * Gérer le paiement PayPal
  */
-router.get('/transactions', authenticate, async (req, res) => {
+async function handlePayPalPayment(product, transaction, res) {
   try {
-    const db = getDatabase();
-    const dbType = getDatabaseType();
+    // Note: paypal-rest-sdk est déprécié, mais on l'utilise pour l'exemple
+    // En production, utilisez @paypal/checkout-server-sdk
+    const paypal = require('paypal-rest-sdk')
     
-    let transactions;
+    paypal.configure({
+      mode: process.env.PAYPAL_MODE || 'sandbox', // 'sandbox' ou 'live'
+      client_id: process.env.PAYPAL_CLIENT_ID || '',
+      client_secret: process.env.PAYPAL_CLIENT_SECRET || ''
+    })
+
+    const create_payment_json = {
+      intent: 'sale',
+      payer: {
+        payment_method: 'paypal'
+      },
+      redirect_urls: {
+        return_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout/success?method=paypal&transaction_id=${transaction.id}`,
+        cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout?error=cancelled`
+      },
+      transactions: [{
+        item_list: {
+          items: [{
+            name: product.name,
+            sku: product.id.toString(),
+            price: Number(product.price).toFixed(2),
+            currency: 'EUR',
+            quantity: 1
+          }]
+        },
+        amount: {
+          currency: 'EUR',
+          total: Number(product.price).toFixed(2)
+        },
+        description: product.description || '',
+        custom: transaction.id.toString()
+      }]
+    }
+
+    paypal.payment.create(create_payment_json, (error, payment) => {
+      if (error) {
+        console.error('Erreur PayPal:', error)
+        return res.status(500).json({ error: 'Erreur lors de la création du paiement PayPal' })
+      } else {
+        // Trouver l'URL d'approbation
+        const approvalUrl = payment.links.find((link) => link.rel === 'approval_url')
+        res.json({
+          approval_url: approvalUrl ? approvalUrl.href : null,
+          transaction_id: transaction.id
+        })
+      }
+    })
+  } catch (error) {
+    console.error('Erreur PayPal:', error)
+    res.status(500).json({ error: 'Erreur lors de la création du paiement PayPal' })
+  }
+}
+
+/**
+ * Gérer le paiement Paysafecard
+ * Note: Paysafecard nécessite un compte marchand et une intégration spécifique
+ * Cette fonction est un placeholder pour l'implémentation future
+ */
+async function handlePaysafecardPayment(product, transaction, res) {
+  try {
+    // Paysafecard nécessite une intégration avec leur API
+    // Pour l'instant, on retourne une URL placeholder
+    // En production, vous devrez utiliser l'API Paysafecard officielle
+    
+    const paymentUrl = `${process.env.PAYSAFECARD_API_URL || 'https://api.paysafecard.com'}/payments?transaction_id=${transaction.id}&amount=${product.price}&currency=EUR`
+    
+    res.json({
+      payment_url: paymentUrl,
+      transaction_id: transaction.id,
+      note: 'Paysafecard nécessite une configuration API spécifique'
+    })
+  } catch (error) {
+    console.error('Erreur Paysafecard:', error)
+    res.status(500).json({ error: 'Erreur lors de la création du paiement Paysafecard' })
+  }
+}
+
+/**
+ * Webhook Stripe pour confirmer les paiements
+ */
+router.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature']
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+
+  let event
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret)
+  } catch (err) {
+    console.error('Erreur webhook Stripe:', err.message)
+    return res.status(400).send(`Webhook Error: ${err.message}`)
+  }
+
+  // Gérer l'événement
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object
+    await handleSuccessfulPayment(paymentIntent.metadata.transaction_id, 'stripe')
+  }
+
+  res.json({ received: true })
+})
+
+/**
+ * Callback PayPal pour confirmer les paiements
+ */
+router.get('/callback/paypal', async (req, res) => {
+  try {
+    const { paymentId, PayerID, transaction_id } = req.query
+
+    if (!paymentId || !PayerID || !transaction_id) {
+      return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout?error=invalid_callback`)
+    }
+
+    const paypal = require('paypal-rest-sdk')
+    paypal.configure({
+      mode: process.env.PAYPAL_MODE || 'sandbox',
+      client_id: process.env.PAYPAL_CLIENT_ID || '',
+      client_secret: process.env.PAYPAL_CLIENT_SECRET || ''
+    })
+
+    const execute_payment_json = {
+      payer_id: PayerID
+    }
+
+    paypal.payment.execute(paymentId, execute_payment_json, async (error, payment) => {
+      if (error) {
+        console.error('Erreur exécution PayPal:', error)
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout?error=payment_failed`)
+      }
+
+      if (payment.state === 'approved') {
+        await handleSuccessfulPayment(transaction_id, 'paypal')
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout/success?method=paypal&transaction_id=${transaction_id}`)
+      } else {
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout?error=payment_failed`)
+      }
+    })
+  } catch (error) {
+    console.error('Erreur callback PayPal:', error)
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/checkout?error=server_error`)
+  }
+})
+
+/**
+ * Gérer un paiement réussi (ajouter crédits, débloquer items, etc.)
+ */
+async function handleSuccessfulPayment(transactionId, paymentMethod) {
+  try {
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (!db || !dbType) {
+      console.error('Base de données non disponible pour confirmer le paiement')
+      return
+    }
+
+    // Récupérer la transaction
+    let transaction
+    if (dbType === 'postgresql') {
+      const transResult = await db.query(
+        'SELECT * FROM transactions WHERE id = $1',
+        [transactionId]
+      )
+      if (transResult.rows.length === 0) {
+        console.error('Transaction non trouvée:', transactionId)
+        return
+      }
+      transaction = transResult.rows[0]
+
+      // Vérifier si déjà traitée
+      if (transaction.status === 'completed') {
+        console.log('Transaction déjà traitée:', transactionId)
+        return
+      }
+
+      // Récupérer le produit
+      const productResult = await db.query('SELECT * FROM products WHERE id = $1', [transaction.product_id])
+      if (productResult.rows.length === 0) {
+        console.error('Produit non trouvé pour la transaction:', transactionId)
+        return
+      }
+      const product = productResult.rows[0]
+
+      // Mettre à jour la transaction
+      await db.query(
+        'UPDATE transactions SET status = $1, payment_method = $2, completed_at = NOW() WHERE id = $3',
+        ['completed', paymentMethod, transactionId]
+      )
+
+      // Ajouter les crédits si c'est un pack de crédits
+      if (product.type === 'credits' && product.credit_amount) {
+        await db.query(
+          'UPDATE users SET credits = credits + $1 WHERE id = $2',
+          [product.credit_amount, transaction.user_id]
+        )
+        console.log(`✅ ${product.credit_amount} crédits ajoutés à l'utilisateur ${transaction.user_id}`)
+      }
+
+      // Pour les armes et skins, on pourrait créer une entrée dans une table inventory
+      // ou envoyer une requête au serveur GMod via API
+      if (product.type === 'weapon_perm' || product.type === 'skin') {
+        // TODO: Intégration avec le serveur GMod
+        console.log(`📦 Item ${product.name} débloqué pour l'utilisateur ${transaction.user_id}`)
+      }
+
+    } else {
+      // MongoDB
+      const Transaction = require('../models/Transaction')
+      const Product = require('../models/Product')
+      
+      transaction = await Transaction.findById(transactionId)
+      if (!transaction || transaction.status === 'completed') {
+        return
+      }
+
+      const product = await Product.findById(transaction.product_id)
+      if (!product) {
+        return
+      }
+
+      transaction.status = 'completed'
+      transaction.payment_method = paymentMethod
+      transaction.completed_at = new Date()
+      await transaction.save()
+
+      if (product.type === 'credits' && product.credit_amount) {
+        const User = require('../models/User')
+        await User.findByIdAndUpdate(transaction.user_id, {
+          $inc: { credits: product.credit_amount }
+        })
+      }
+    }
+
+    console.log(`✅ Paiement confirmé: Transaction ${transactionId} (${paymentMethod})`)
+  } catch (error) {
+    console.error('Erreur lors du traitement du paiement réussi:', error)
+  }
+}
+
+/**
+ * Récupérer l'historique des transactions de l'utilisateur
+ */
+router.get('/transactions', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (!db || !dbType) {
+      return res.status(500).json({ error: 'Base de données non disponible' })
+    }
+
+    let transactions
     if (dbType === 'postgresql') {
       const result = await db.query(
-        `SELECT t.*, p.name as product_name, p.type as product_type 
-         FROM transactions t 
-         JOIN products p ON t.product_id = p.id 
-         WHERE t.user_id = $1 
-         ORDER BY t.created_at DESC 
+        `SELECT t.*, p.name as product_name, p.type as product_type
+         FROM transactions t
+         JOIN products p ON t.product_id = p.id
+         WHERE t.user_id = $1
+         ORDER BY t.created_at DESC
          LIMIT 50`,
-        [req.user.id]
-      );
-      transactions = result.rows;
-    } else if (dbType === 'mongodb') {
-      const Transaction = require('../models/Transaction');
-      transactions = await Transaction.find({ user_id: req.user.id })
+        [userId]
+      )
+      transactions = result.rows
+    } else {
+      const Transaction = require('../models/Transaction')
+      transactions = await Transaction.find({ user_id: userId })
         .populate('product_id', 'name type')
         .sort({ created_at: -1 })
-        .limit(50);
+        .limit(50)
     }
-    
-    res.json({ transactions });
-  } catch (error) {
-    console.error('Erreur récupération transactions:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-});
 
-module.exports = router;
+    res.json({ transactions })
+  } catch (error) {
+    console.error('Erreur récupération transactions:', error)
+    res.status(500).json({ error: 'Erreur lors de la récupération des transactions' })
+  }
+})
+
+module.exports = router
