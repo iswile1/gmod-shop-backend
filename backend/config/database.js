@@ -93,12 +93,15 @@ async function initPostgreSQLTables() {
       steam_id VARCHAR(255) UNIQUE,
       username VARCHAR(255) NOT NULL,
       email VARCHAR(255) UNIQUE NOT NULL,
-      password_hash VARCHAR(255) NOT NULL,
+      password_hash VARCHAR(255), -- NULL autorisé pour les utilisateurs Steam
       credits INTEGER DEFAULT 0,
       role VARCHAR(50) DEFAULT 'user',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
+    
+    // Modifier la colonne password_hash pour permettre NULL (si la table existe déjà)
+    `ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL`,
     
     // Table des produits
     `CREATE TABLE IF NOT EXISTS products (

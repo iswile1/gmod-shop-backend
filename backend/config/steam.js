@@ -8,8 +8,11 @@ const SteamStrategy = require('passport-steam').Strategy;
 
 // Configuration Steam
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
-const STEAM_REALM = process.env.STEAM_REALM || process.env.FRONTEND_URL || 'http://localhost:3000';
-const STEAM_RETURN_URL = process.env.STEAM_RETURN_URL || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/api/auth/steam/return`;
+// Pour Steam OpenID, le realm et returnURL doivent être sur le même domaine
+// Utilisons l'URL du backend (Railway) pour les deux
+const BACKEND_URL = process.env.BACKEND_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'https://brave-manifestation-production.up.railway.app';
+const STEAM_REALM = process.env.STEAM_REALM || BACKEND_URL;
+const STEAM_RETURN_URL = process.env.STEAM_RETURN_URL || `${BACKEND_URL}/api/auth/steam/return`;
 
 // Log pour déboguer (à retirer en production)
 console.log('🔐 Configuration Steam:');

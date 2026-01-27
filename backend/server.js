@@ -27,7 +27,12 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Trust proxy (nécessaire pour Railway et les headers X-Forwarded-For)
-app.set('trust proxy', true);
+// Trust uniquement Railway (plus sécurisé que trust proxy: true)
+app.set('trust proxy', 1);
+
+// Désactiver le warning de express-rate-limit pour trust proxy
+// Car nous utilisons trust proxy: 1 (un seul proxy) ce qui est sécurisé
+process.env.EXPRESS_RATE_LIMIT_TRUST_PROXY = 'true';
 
 // Middlewares de sécurité
 app.use(helmet());

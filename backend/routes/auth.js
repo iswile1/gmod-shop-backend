@@ -245,9 +245,9 @@ router.get('/steam/return', async (req, res, next) => {
           // Utilisateur existant
           user = result.rows[0];
         } else {
-          // Créer un nouvel utilisateur
+          // Créer un nouvel utilisateur (sans password_hash pour Steam)
           const insertResult = await db.query(
-            'INSERT INTO users (username, steam_id, email) VALUES ($1, $2, $3) RETURNING id, username, email, credits, role, steam_id',
+            'INSERT INTO users (username, steam_id, email, password_hash) VALUES ($1, $2, $3, NULL) RETURNING id, username, email, credits, role, steam_id',
             [steamUser.username, steamUser.steamId, `${steamUser.steamId}@steam.local`]
           );
           user = insertResult.rows[0];
@@ -269,6 +269,7 @@ router.get('/steam/return', async (req, res, next) => {
       // Générer le token JWT
       const token = generateToken({ userId: user.id });
       console.log('✅ Token généré pour user:', user.id);
+      console.log('✅ User créé/trouvé:', { id: user.id, username: user.username, steamId: user.steam_id });
       
       // Rediriger vers le frontend avec le token
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -278,8 +279,11 @@ router.get('/steam/return', async (req, res, next) => {
       
     } catch (error) {
       console.error('❌ Erreur authentification Steam:', error);
+      console.error('❌ Message:', error.message);
       console.error('❌ Stack:', error.stack);
-      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=server_error`);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const errorMessage = process.env.NODE_ENV === 'development' ? error.message : 'server_error';
+      res.redirect(`${frontendUrl}/login?error=${errorMessage}`);
     }
   })(req, res, next);
 });
