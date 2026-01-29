@@ -404,7 +404,7 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
           'UPDATE transactions SET status = $1, payment_method = $2 WHERE id = $3',
           ['completed', paymentMethod, transactionId]
         )
-      } catch (updateError: any) {
+      } catch (updateError) {
         console.error('❌ Erreur mise à jour transaction:', updateError.message)
         throw updateError
       }
