@@ -31,39 +31,65 @@ router.post('/create-intent', authenticate, async (req, res) => {
       return res.status(500).json({ error: 'Base de données non disponible' })
     }
 
-    // Récupérer tous les produits
-    let products = []
+    // Récupérer les produits uniques (pour avoir leurs prix)
+    const uniqueProductIds = [...new Set(productIds)]
+    let productMap = new Map()
+    
     if (dbType === 'postgresql') {
-      // Créer une requête avec plusieurs IDs
-      const placeholders = productIds.map((_, i) => `$${i + 1}`).join(',')
+      // Créer une requête avec les IDs uniques
+      const placeholders = uniqueProductIds.map((_, i) => `$${i + 1}`).join(',')
       const result = await db.query(
         `SELECT * FROM products WHERE id IN (${placeholders})`,
-        productIds
+        uniqueProductIds
       )
-      products = result.rows
       
-      if (products.length !== productIds.length) {
+      if (result.rows.length !== uniqueProductIds.length) {
         console.error('❌ Certains produits non trouvés')
         return res.status(404).json({ error: 'Un ou plusieurs produits non trouvés' })
       }
-      console.log(`✅ ${products.length} produit(s) trouvé(s)`)
+      
+      // Créer une map pour accéder rapidement aux produits par ID
+      result.rows.forEach(product => {
+        productMap.set(product.id, product)
+      })
+      console.log(`✅ ${result.rows.length} produit(s) unique(s) trouvé(s)`)
     } else {
       const Product = require('../models/Product')
-      products = await Product.find({ _id: { $in: productIds } })
-      if (products.length !== productIds.length) {
+      const products = await Product.find({ _id: { $in: uniqueProductIds } })
+      if (products.length !== uniqueProductIds.length) {
         console.error('❌ Certains produits non trouvés')
         return res.status(404).json({ error: 'Un ou plusieurs produits non trouvés' })
       }
+      products.forEach(product => {
+        productMap.set(product._id.toString(), product)
+      })
     }
 
-    // Calculer le montant total
-    const totalAmount = products.reduce((sum, p) => sum + Number(p.price), 0)
+    // Calculer le montant total en parcourant tous les productIds (avec doublons)
+    let totalAmount = 0
+    const products = []
+    for (const productId of productIds) {
+      const product = dbType === 'postgresql' 
+        ? productMap.get(Number(productId))
+        : productMap.get(productId.toString())
+      
+      if (!product) {
+        console.error(`❌ Produit ${productId} non trouvé`)
+        return res.status(404).json({ error: `Produit ${productId} non trouvé` })
+      }
+      
+      const price = dbType === 'postgresql' ? Number(product.price) : Number(product.price)
+      totalAmount += price
+      products.push(product)
+    }
 
-    // Créer une transaction pour chaque produit
+    // Créer une transaction pour chaque ID dans productIds (même si c'est le même produit)
     let transactions = []
     if (dbType === 'postgresql') {
       try {
-        for (const product of products) {
+        for (let i = 0; i < productIds.length; i++) {
+          const productId = productIds[i]
+          const product = productMap.get(Number(productId))
           const transResult = await db.query(
             `INSERT INTO transactions (user_id, product_id, amount, status, payment_method, created_at)
              VALUES ($1, $2, $3, 'pending', $4, NOW())
@@ -72,7 +98,7 @@ router.post('/create-intent', authenticate, async (req, res) => {
           )
           transactions.push(transResult.rows[0])
         }
-        console.log(`✅ ${transactions.length} transaction(s) créée(s)`)
+        console.log(`✅ ${transactions.length} transaction(s) créée(s) pour ${productIds.length} produit(s)`)
       } catch (error) {
         console.error('❌ Erreur création transaction:', error.message)
         if (error.message.includes('relation "transactions" does not exist')) {
@@ -84,7 +110,9 @@ router.post('/create-intent', authenticate, async (req, res) => {
       }
     } else {
       const Transaction = require('../models/Transaction')
-      for (const product of products) {
+      for (let i = 0; i < productIds.length; i++) {
+        const productId = productIds[i]
+        const product = productMap.get(productId.toString())
         const transaction = await Transaction.create({
           user_id: userId,
           product_id: product._id,
