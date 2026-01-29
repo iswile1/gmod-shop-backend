@@ -1,107 +1,111 @@
-/**
- * Routes pour les produits
- * Liste, détails, achat de produits
- */
-
-const express = require('express');
-const { getDatabase, getDatabaseType } = require('../config/database');
-const { authenticate } = require('../middleware/auth');
-
-const router = express.Router();
+const express = require('express')
+const router = express.Router()
+const { getDatabase, getDatabaseType } = require('../config/database')
 
 /**
- * GET /api/products
- * Liste tous les produits actifs
+ * Récupérer tous les produits actifs
  */
 router.get('/', async (req, res) => {
   try {
-    const db = getDatabase();
-    const dbType = getDatabaseType();
-    
-    let products;
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (!db || !dbType) {
+      return res.status(500).json({ error: 'Base de données non disponible' })
+    }
+
+    let products = []
     if (dbType === 'postgresql') {
       const result = await db.query(
-        'SELECT id, name, description, type, price, credits_amount, item_data, image_url FROM products WHERE active = true ORDER BY type, price'
-      );
-      products = result.rows;
-    } else if (dbType === 'mongodb') {
-      const Product = require('../models/Product');
-      products = await Product.find({ active: true }).select('-__v');
+        'SELECT * FROM products WHERE active = true ORDER BY price ASC'
+      )
+      products = result.rows
+    } else {
+      const Product = require('../models/Product')
+      products = await Product.find({ active: true }).sort({ price: 1 })
+      products = products.map(p => p.toObject())
     }
-    
-    res.json({ products });
+
+    res.json({ products })
   } catch (error) {
-    console.error('Erreur récupération produits:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
+    console.error('Erreur récupération produits:', error)
+    res.status(500).json({ error: 'Erreur lors de la récupération des produits' })
   }
-});
+})
 
 /**
- * GET /api/products/:id
- * Détails d'un produit
+ * Récupérer un produit par ID
  */
 router.get('/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const db = getDatabase();
-    const dbType = getDatabaseType();
-    
-    let product;
+    const { id } = req.params
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (!db || !dbType) {
+      return res.status(500).json({ error: 'Base de données non disponible' })
+    }
+
+    let product
     if (dbType === 'postgresql') {
-      const result = await db.query(
-        'SELECT id, name, description, type, price, credits_amount, item_data, image_url FROM products WHERE id = $1 AND active = true',
-        [id]
-      );
-      product = result.rows[0];
-    } else if (dbType === 'mongodb') {
-      const Product = require('../models/Product');
-      product = await Product.findOne({ _id: id, active: true }).select('-__v');
+      const result = await db.query('SELECT * FROM products WHERE id = $1', [id])
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Produit non trouvé' })
+      }
+      product = result.rows[0]
+    } else {
+      const Product = require('../models/Product')
+      product = await Product.findById(id)
+      if (!product) {
+        return res.status(404).json({ error: 'Produit non trouvé' })
+      }
+      product = product.toObject()
     }
-    
-    if (!product) {
-      return res.status(404).json({ error: 'Produit non trouvé' });
-    }
-    
-    res.json({ product });
+
+    res.json({ product })
   } catch (error) {
-    console.error('Erreur récupération produit:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
+    console.error('Erreur récupération produit:', error)
+    res.status(500).json({ error: 'Erreur lors de la récupération du produit' })
   }
-});
+})
 
 /**
- * GET /api/products/type/:type
- * Liste les produits par type (credits, weapon_perm, skin)
+ * Récupérer les produits par type
  */
 router.get('/type/:type', async (req, res) => {
   try {
-    const { type } = req.params;
-    const validTypes = ['credits', 'weapon_perm', 'skin'];
-    
-    if (!validTypes.includes(type)) {
-      return res.status(400).json({ error: 'Type de produit invalide' });
+    const { type } = req.params
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (!db || !dbType) {
+      return res.status(500).json({ error: 'Base de données non disponible' })
     }
-    
-    const db = getDatabase();
-    const dbType = getDatabaseType();
-    
-    let products;
+
+    // Valider le type
+    const validTypes = ['credits', 'weapon_perm', 'skin']
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ error: 'Type de produit invalide' })
+    }
+
+    let products = []
     if (dbType === 'postgresql') {
       const result = await db.query(
-        'SELECT id, name, description, type, price, credits_amount, item_data, image_url FROM products WHERE type = $1 AND active = true ORDER BY price',
+        'SELECT * FROM products WHERE type = $1 AND active = true ORDER BY price ASC',
         [type]
-      );
-      products = result.rows;
-    } else if (dbType === 'mongodb') {
-      const Product = require('../models/Product');
-      products = await Product.find({ type, active: true }).select('-__v').sort({ price: 1 });
+      )
+      products = result.rows
+    } else {
+      const Product = require('../models/Product')
+      products = await Product.find({ type, active: true }).sort({ price: 1 })
+      products = products.map(p => p.toObject())
     }
-    
-    res.json({ products });
-  } catch (error) {
-    console.error('Erreur récupération produits par type:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-});
 
-module.exports = router;
+    res.json({ products })
+  } catch (error) {
+    console.error('Erreur récupération produits par type:', error)
+    res.status(500).json({ error: 'Erreur lors de la récupération des produits' })
+  }
+})
+
+module.exports = router
