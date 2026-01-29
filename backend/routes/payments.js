@@ -115,16 +115,25 @@ async function handleStripePayment(product, transaction, res) {
       return res.status(500).json({ error: 'Stripe non configuré' })
     }
 
+    // Vérifier que Stripe est bien configuré
+    console.log('💳 Création PaymentIntent Stripe:', {
+      amount: Math.round(Number(product.price) * 100),
+      currency: 'eur',
+      hasStripeKey: !!process.env.STRIPE_SECRET_KEY
+    })
+
     const paymentIntent = await stripe.paymentIntents.create({
       amount: Math.round(Number(product.price) * 100), // Convertir en centimes
       currency: 'eur',
+      payment_method_types: ['card'], // Spécifier explicitement les cartes bancaires
       metadata: {
         transaction_id: transaction.id.toString(),
         product_id: product.id.toString(),
         user_id: transaction.user_id.toString()
       },
-      payment_method_types: ['card'], // Spécifier explicitement les cartes bancaires
     })
+
+    console.log('✅ PaymentIntent créé:', paymentIntent.id)
 
     res.json({
       client_secret: paymentIntent.client_secret,
@@ -221,6 +230,66 @@ async function handlePaysafecardPayment(product, transaction, res) {
     res.status(500).json({ error: 'Erreur lors de la création du paiement Paysafecard' })
   }
 }
+
+/**
+ * Confirmer un paiement Stripe réussi (appelé depuis le frontend)
+ */
+router.post('/confirm-payment', authenticate, async (req, res) => {
+  try {
+    const { payment_intent_id } = req.body
+    const userId = req.user.id
+
+    if (!payment_intent_id) {
+      return res.status(400).json({ error: 'payment_intent_id requis' })
+    }
+
+    console.log('💳 Confirmation paiement:', { payment_intent_id, userId })
+
+    // Vérifier le PaymentIntent avec Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id)
+
+    if (paymentIntent.status !== 'succeeded') {
+      return res.status(400).json({ error: 'Le paiement n\'a pas réussi' })
+    }
+
+    // Récupérer l'ID de transaction depuis les métadonnées
+    const transactionId = paymentIntent.metadata.transaction_id
+
+    if (!transactionId) {
+      console.error('❌ Transaction ID manquant dans les métadonnées')
+      return res.status(400).json({ error: 'Transaction ID manquant' })
+    }
+
+    // Vérifier que la transaction appartient à l'utilisateur
+    const db = getDatabase()
+    const dbType = getDatabaseType()
+
+    if (dbType === 'postgresql') {
+      const transResult = await db.query(
+        'SELECT * FROM transactions WHERE id = $1 AND user_id = $2',
+        [transactionId, userId]
+      )
+
+      if (transResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Transaction non trouvée' })
+      }
+    }
+
+    // Traiter le paiement réussi
+    await handleSuccessfulPayment(transactionId, 'stripe')
+
+    res.json({ 
+      success: true, 
+      message: 'Paiement confirmé et crédits ajoutés' 
+    })
+  } catch (error) {
+    console.error('Erreur confirmation paiement:', error)
+    res.status(500).json({ 
+      error: 'Erreur lors de la confirmation du paiement',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    })
+  }
+})
 
 /**
  * Webhook Stripe pour confirmer les paiements
