@@ -11,13 +11,16 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
  */
 router.post('/create-intent', authenticate, async (req, res) => {
   try {
-    const { product_id, payment_method } = req.body
+    const { product_id, product_ids, payment_method } = req.body
     const userId = req.user.id
 
-    console.log('💳 Création intent paiement:', { product_id, payment_method, userId })
+    // Support pour un produit unique (product_id) ou plusieurs produits (product_ids)
+    const productIds = product_ids && Array.isArray(product_ids) ? product_ids : (product_id ? [product_id] : [])
+    
+    console.log('💳 Création intent paiement:', { product_id, product_ids, productIds, payment_method, userId })
 
-    if (!product_id) {
-      return res.status(400).json({ error: 'product_id requis' })
+    if (productIds.length === 0) {
+      return res.status(400).json({ error: 'product_id ou product_ids requis' })
     }
 
     const db = getDatabase()
@@ -28,41 +31,50 @@ router.post('/create-intent', authenticate, async (req, res) => {
       return res.status(500).json({ error: 'Base de données non disponible' })
     }
 
-    // Récupérer le produit
-    let product
+    // Récupérer tous les produits
+    let products = []
     if (dbType === 'postgresql') {
-      const result = await db.query('SELECT * FROM products WHERE id = $1', [product_id])
-      if (result.rows.length === 0) {
-        console.error('❌ Produit non trouvé:', product_id)
-        return res.status(404).json({ error: 'Produit non trouvé' })
+      // Créer une requête avec plusieurs IDs
+      const placeholders = productIds.map((_, i) => `$${i + 1}`).join(',')
+      const result = await db.query(
+        `SELECT * FROM products WHERE id IN (${placeholders})`,
+        productIds
+      )
+      products = result.rows
+      
+      if (products.length !== productIds.length) {
+        console.error('❌ Certains produits non trouvés')
+        return res.status(404).json({ error: 'Un ou plusieurs produits non trouvés' })
       }
-      product = result.rows[0]
-      console.log('✅ Produit trouvé:', product.name, product.price)
+      console.log(`✅ ${products.length} produit(s) trouvé(s)`)
     } else {
       const Product = require('../models/Product')
-      product = await Product.findById(product_id)
-      if (!product) {
-        console.error('❌ Produit non trouvé:', product_id)
-        return res.status(404).json({ error: 'Produit non trouvé' })
+      products = await Product.find({ _id: { $in: productIds } })
+      if (products.length !== productIds.length) {
+        console.error('❌ Certains produits non trouvés')
+        return res.status(404).json({ error: 'Un ou plusieurs produits non trouvés' })
       }
     }
 
-    // Créer une transaction en attente
-    let transaction
+    // Calculer le montant total
+    const totalAmount = products.reduce((sum, p) => sum + Number(p.price), 0)
+
+    // Créer une transaction pour chaque produit
+    let transactions = []
     if (dbType === 'postgresql') {
       try {
-        const transResult = await db.query(
-          `INSERT INTO transactions (user_id, product_id, amount, status, payment_method, created_at)
-           VALUES ($1, $2, $3, 'pending', $4, NOW())
-           RETURNING *`,
-          [userId, product_id, product.price, payment_method || 'stripe']
-        )
-        transaction = transResult.rows[0]
-        console.log('✅ Transaction créée:', transaction.id)
+        for (const product of products) {
+          const transResult = await db.query(
+            `INSERT INTO transactions (user_id, product_id, amount, status, payment_method, created_at)
+             VALUES ($1, $2, $3, 'pending', $4, NOW())
+             RETURNING *`,
+            [userId, product.id, product.price, payment_method || 'stripe']
+          )
+          transactions.push(transResult.rows[0])
+        }
+        console.log(`✅ ${transactions.length} transaction(s) créée(s)`)
       } catch (error) {
         console.error('❌ Erreur création transaction:', error.message)
-        console.error('❌ Détails:', error)
-        // Si la table n'existe pas, donner un message plus clair
         if (error.message.includes('relation "transactions" does not exist')) {
           return res.status(500).json({ 
             error: 'Table transactions manquante. Exécutez le script CREATE_TRANSACTIONS_TABLE.sql dans Supabase.' 
@@ -72,30 +84,38 @@ router.post('/create-intent', authenticate, async (req, res) => {
       }
     } else {
       const Transaction = require('../models/Transaction')
-      transaction = await Transaction.create({
-        user_id: userId,
-        product_id: product_id,
-        amount: product.price,
-        status: 'pending',
-        payment_method: payment_method || 'stripe'
-      })
-      transaction = transaction.toObject()
+      for (const product of products) {
+        const transaction = await Transaction.create({
+          user_id: userId,
+          product_id: product._id,
+          amount: product.price,
+          status: 'pending',
+          payment_method: payment_method || 'stripe'
+        })
+        transactions.push(transaction.toObject())
+      }
     }
 
-    // Gérer selon la méthode de paiement
-    switch (payment_method) {
-      case 'stripe':
-        return handleStripePayment(product, transaction, res)
-      
-      case 'paypal':
-        return handlePayPalPayment(product, transaction, res)
-      
-      case 'paysafecard':
-        return handlePaysafecardPayment(product, transaction, res)
-      
-      default:
-        return handleStripePayment(product, transaction, res)
+    // Pour Stripe, créer un PaymentIntent avec le montant total
+    // Les metadata contiendront tous les transaction_ids
+    if (payment_method === 'stripe' || !payment_method) {
+      return handleStripePaymentMultiple(products, transactions, totalAmount, res)
     }
+
+    // Pour un seul produit, utiliser l'ancienne logique
+    if (products.length === 1) {
+      switch (payment_method) {
+        case 'paypal':
+          return handlePayPalPayment(products[0], transactions[0], res)
+        case 'paysafecard':
+          return handlePaysafecardPayment(products[0], transactions[0], res)
+        default:
+          return handleStripePayment(products[0], transactions[0], res)
+      }
+    }
+
+    // Pour plusieurs produits avec PayPal/Paysafecard, on ne supporte que Stripe pour l'instant
+    return res.status(400).json({ error: 'Les paiements multiples ne sont supportés que via Stripe' })
   } catch (error) {
     console.error('❌ Erreur création intent paiement:', error)
     console.error('❌ Stack:', error.stack)
@@ -105,6 +125,53 @@ router.post('/create-intent', authenticate, async (req, res) => {
     })
   }
 })
+
+/**
+ * Gérer le paiement Stripe pour plusieurs produits
+ */
+async function handleStripePaymentMultiple(products, transactions, totalAmount, res) {
+  try {
+    if (!stripe || !process.env.STRIPE_SECRET_KEY) {
+      return res.status(500).json({ error: 'Stripe non configuré' })
+    }
+
+    console.log('💳 Création PaymentIntent Stripe (multiple):', {
+      amount: Math.round(Number(totalAmount) * 100),
+      currency: 'eur',
+      productCount: products.length,
+      transactionCount: transactions.length,
+      hasStripeKey: !!process.env.STRIPE_SECRET_KEY
+    })
+
+    // Créer un PaymentIntent avec le montant total
+    // Les metadata contiendront tous les transaction_ids séparés par des virgules
+    const transactionIds = transactions.map(t => t.id.toString()).join(',')
+    const productIds = products.map(p => p.id.toString()).join(',')
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(Number(totalAmount) * 100), // Convertir en centimes
+      currency: 'eur',
+      payment_method_types: ['card'],
+      metadata: {
+        transaction_ids: transactionIds,
+        product_ids: productIds,
+        user_id: transactions[0].user_id.toString(),
+        is_multiple: 'true'
+      },
+    })
+
+    console.log('✅ PaymentIntent créé (multiple):', paymentIntent.id)
+
+    res.json({
+      client_secret: paymentIntent.client_secret,
+      transaction_ids: transactions.map(t => t.id),
+      is_multiple: true
+    })
+  } catch (error) {
+    console.error('Erreur Stripe (multiple):', error)
+    res.status(500).json({ error: 'Erreur lors de la création du paiement Stripe' })
+  }
+}
 
 /**
  * Gérer le paiement Stripe
@@ -252,7 +319,64 @@ router.post('/confirm-payment', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Le paiement n\'a pas réussi' })
     }
 
-    // Récupérer l'ID de transaction depuis les métadonnées
+    // Vérifier si c'est un paiement multiple
+    const isMultiple = paymentIntent.metadata.is_multiple === 'true'
+    
+    if (isMultiple) {
+      // Gérer plusieurs transactions
+      const transactionIds = paymentIntent.metadata.transaction_ids
+      if (!transactionIds) {
+        console.error('❌ Transaction IDs manquants dans les métadonnées')
+        return res.status(400).json({ error: 'Transaction IDs manquants' })
+      }
+
+      const transactionIdArray = transactionIds.split(',').map(id => parseInt(id.trim()))
+      console.log('💳 Confirmation paiement multiple:', { transactionIdArray, userId })
+
+      // Vérifier que toutes les transactions appartiennent à l'utilisateur
+      const db = getDatabase()
+      const dbType = getDatabaseType()
+      
+      if (dbType === 'postgresql') {
+        const placeholders = transactionIdArray.map((_, i) => `$${i + 1}`).join(',')
+        const checkResult = await db.query(
+          `SELECT id FROM transactions WHERE id IN (${placeholders}) AND user_id = $${transactionIdArray.length + 1}`,
+          [...transactionIdArray, userId]
+        )
+        
+        if (checkResult.rows.length !== transactionIdArray.length) {
+          return res.status(403).json({ error: 'Certaines transactions ne vous appartiennent pas' })
+        }
+      }
+
+      // Traiter chaque transaction
+      const results = []
+      for (const transactionId of transactionIdArray) {
+        try {
+          await handleSuccessfulPayment(transactionId, 'stripe')
+          results.push({ transaction_id: transactionId, status: 'success' })
+        } catch (error) {
+          console.error(`❌ Erreur traitement transaction ${transactionId}:`, error)
+          results.push({ transaction_id: transactionId, status: 'error', error: error.message })
+        }
+      }
+
+      // Vérifier que les crédits ont bien été ajoutés
+      if (dbType === 'postgresql') {
+        const userResult = await db.query('SELECT credits FROM users WHERE id = $1', [userId])
+        const userCredits = userResult.rows[0]?.credits || 0
+        console.log(`💰 Crédits actuels de l'utilisateur ${userId}: ${userCredits}`)
+      }
+
+      res.json({ 
+        success: true, 
+        message: 'Paiement confirmé et crédits ajoutés',
+        transactions: results
+      })
+      return
+    }
+
+    // Gérer une seule transaction (ancien comportement)
     const transactionId = paymentIntent.metadata.transaction_id
 
     if (!transactionId) {
