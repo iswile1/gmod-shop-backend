@@ -278,9 +278,17 @@ router.post('/confirm-payment', authenticate, async (req, res) => {
     // Traiter le paiement réussi
     await handleSuccessfulPayment(transactionId, 'stripe')
 
+    // Vérifier que les crédits ont bien été ajoutés
+    if (dbType === 'postgresql') {
+      const userResult = await db.query('SELECT credits FROM users WHERE id = $1', [userId])
+      const userCredits = userResult.rows[0]?.credits || 0
+      console.log(`💰 Crédits actuels de l'utilisateur ${userId}: ${userCredits}`)
+    }
+
     res.json({ 
       success: true, 
-      message: 'Paiement confirmé et crédits ajoutés' 
+      message: 'Paiement confirmé et crédits ajoutés',
+      credits_added: true
     })
   } catch (error) {
     console.error('Erreur confirmation paiement:', error)
@@ -392,10 +400,11 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
       // Récupérer le produit
       const productResult = await db.query('SELECT * FROM products WHERE id = $1', [transaction.product_id])
       if (productResult.rows.length === 0) {
-        console.error('Produit non trouvé pour la transaction:', transactionId)
+        console.error('❌ Produit non trouvé pour la transaction:', transactionId)
         return
       }
       const product = productResult.rows[0]
+      console.log(`📦 Produit trouvé: ${product.name}, type: ${product.type}, credit_amount: ${product.credit_amount}`)
 
       // Mettre à jour la transaction
       // Note: Si la colonne completed_at n'existe pas, on l'ignore
@@ -411,11 +420,17 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
 
       // Ajouter les crédits si c'est un pack de crédits
       if (product.type === 'credits' && product.credit_amount) {
-        await db.query(
-          'UPDATE users SET credits = credits + $1 WHERE id = $2',
+        console.log(`💰 Ajout de ${product.credit_amount} crédits à l'utilisateur ${transaction.user_id}`)
+        
+        const updateResult = await db.query(
+          'UPDATE users SET credits = credits + $1 WHERE id = $2 RETURNING credits',
           [product.credit_amount, transaction.user_id]
         )
-        console.log(`✅ ${product.credit_amount} crédits ajoutés à l'utilisateur ${transaction.user_id}`)
+        
+        const newCredits = updateResult.rows[0]?.credits || 0
+        console.log(`✅ ${product.credit_amount} crédits ajoutés à l'utilisateur ${transaction.user_id}. Nouveau total: ${newCredits}`)
+      } else {
+        console.log(`⚠️ Produit n'est pas un pack de crédits (type: ${product.type})`)
       }
 
       // Pour les armes et skins, on pourrait créer une entrée dans une table inventory
@@ -442,7 +457,6 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
 
       transaction.status = 'completed'
       transaction.payment_method = paymentMethod
-      transaction.completed_at = new Date()
       await transaction.save()
 
       if (product.type === 'credits' && product.credit_amount) {
