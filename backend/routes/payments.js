@@ -398,10 +398,16 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
       const product = productResult.rows[0]
 
       // Mettre à jour la transaction
-      await db.query(
-        'UPDATE transactions SET status = $1, payment_method = $2, completed_at = NOW() WHERE id = $3',
-        ['completed', paymentMethod, transactionId]
-      )
+      // Note: Si la colonne completed_at n'existe pas, on l'ignore
+      try {
+        await db.query(
+          'UPDATE transactions SET status = $1, payment_method = $2 WHERE id = $3',
+          ['completed', paymentMethod, transactionId]
+        )
+      } catch (updateError: any) {
+        console.error('❌ Erreur mise à jour transaction:', updateError.message)
+        throw updateError
+      }
 
       // Ajouter les crédits si c'est un pack de crédits
       if (product.type === 'credits' && product.credit_amount) {
