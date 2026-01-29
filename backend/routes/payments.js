@@ -404,7 +404,7 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
         return
       }
       const product = productResult.rows[0]
-      console.log(`📦 Produit trouvé: ${product.name}, type: ${product.type}, credit_amount: ${product.credit_amount}`)
+      console.log(`📦 Produit trouvé: ${product.name}, type: ${product.type}, credits_amount: ${product.credits_amount}`)
 
       // Mettre à jour la transaction
       // Note: Si la colonne completed_at n'existe pas, on l'ignore
@@ -419,16 +419,16 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
       }
 
       // Ajouter les crédits si c'est un pack de crédits
-      if (product.type === 'credits' && product.credit_amount) {
-        console.log(`💰 Ajout de ${product.credit_amount} crédits à l'utilisateur ${transaction.user_id}`)
+      if (product.type === 'credits' && product.credits_amount) {
+        console.log(`💰 Ajout de ${product.credits_amount} crédits à l'utilisateur ${transaction.user_id}`)
         
         const updateResult = await db.query(
           'UPDATE users SET credits = credits + $1 WHERE id = $2 RETURNING credits',
-          [product.credit_amount, transaction.user_id]
+          [product.credits_amount, transaction.user_id]
         )
         
         const newCredits = updateResult.rows[0]?.credits || 0
-        console.log(`✅ ${product.credit_amount} crédits ajoutés à l'utilisateur ${transaction.user_id}. Nouveau total: ${newCredits}`)
+        console.log(`✅ ${product.credits_amount} crédits ajoutés à l'utilisateur ${transaction.user_id}. Nouveau total: ${newCredits}`)
       } else {
         console.log(`⚠️ Produit n'est pas un pack de crédits (type: ${product.type})`)
       }
@@ -459,10 +459,10 @@ async function handleSuccessfulPayment(transactionId, paymentMethod) {
       transaction.payment_method = paymentMethod
       await transaction.save()
 
-      if (product.type === 'credits' && product.credit_amount) {
+      if (product.type === 'credits' && product.credits_amount) {
         const User = require('../models/User')
         await User.findByIdAndUpdate(transaction.user_id, {
-          $inc: { credits: product.credit_amount }
+          $inc: { credits: product.credits_amount }
         })
       }
     }
